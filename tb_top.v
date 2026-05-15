@@ -23,6 +23,12 @@ module tb_top;
         forever #10 clk = ~clk; 
     end
 
+    // --- NEW: Array to hold the test image ---
+    reg [7:0] test_image [0:783];
+    initial begin
+        $readmemh("test_image.hex", test_image);
+    end
+
     // 4. UART Byte Sending Task (Acts like your PC's USB port)
     // Baud Rate: 115200 -> 1 bit takes exactly 8680 nanoseconds
     task send_uart_byte(input [7:0] data);
@@ -61,10 +67,9 @@ module tb_top;
         
         $display("--- Starting Hardware Simulation ---");
 
-        // Send 784 dummy pixels (a solid gray image, value 128)
-        $display("Injecting 784 bytes via UART...");
+        $display("Injecting 784 real MNIST pixels via UART...");
         for (integer p = 0; p < 784; p = p + 1) begin
-            send_uart_byte(8'd128); 
+            send_uart_byte(test_image[p]); 
         end
         
         $display("Image loaded! Chip FSM should now transition to COMPUTE.");

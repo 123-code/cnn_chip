@@ -1,26 +1,21 @@
 module top_mnist_accel (
-    input  wire clk,          // 50 MHz board clock
-    input  wire rst_n,        // Active-low reset button
-    input  wire uart_rx_pin,  // Physical pin connected to USB RX
-    output wire uart_tx_pin   // Physical pin connected to USB TX
+    input  wire clk,
+    input  wire rst_n,
+    input  wire uart_rx_pin,
+    output wire uart_tx_pin
 );
 
     // ==========================================
-    // 1. The Internal Copper Wires
+    // Internal Copper Wires
     // ==========================================
-    
-    // UART <--> FSM & Memory wires
     wire [7:0] rx_byte;
     wire       rx_valid;
     wire       tx_done;
     wire       tx_start;
 
-    // FSM <--> Compute Pipeline wires
     wire       start_layer;
-    wire [1:0] layer_type;
     wire       layer_done;
 
-    // Memory <--> Compute Pipeline wires
     wire [7:0]  sram_pixel_out;
     wire [9:0]  sram_read_addr;
     wire        sram_write_en;
@@ -29,14 +24,11 @@ module top_mnist_accel (
     wire [31:0] rom_bias_out;
     wire [15:0] rom_read_addr;
 
-    // Compute Pipeline <--> UART TX wires
     wire [3:0]  predicted_digit;
 
     // ==========================================
-    // 2. Plugging in the Modules (Instantiation)
+    // Module Instantiation
     // ==========================================
-
-    // --- The Brain ---
     control_unit u_fsm (
         .clk(clk),
         .rst_n(rst_n),
@@ -45,16 +37,13 @@ module top_mnist_accel (
         .tx_done(tx_done),
         .sram_write_en(sram_write_en),
         .start_layer(start_layer),
-        .layer_type(layer_type),
         .tx_start(tx_start)
     );
 
-    // --- The Muscle ---
     compute_pipeline u_compute (
         .clk(clk),
         .rst_n(rst_n),
         .start_layer(start_layer),
-        .layer_type(layer_type),
         .pixel_in(sram_pixel_out),
         .weight_in(rom_weight_out),
         .bias_in(rom_bias_out),
@@ -64,7 +53,6 @@ module top_mnist_accel (
         .predicted_digit(predicted_digit)
     );
 
-    // --- The I/O ---
     uart_rx u_uart_rx (
         .clk(clk),
         .rst_n(rst_n),
@@ -77,18 +65,16 @@ module top_mnist_accel (
         .clk(clk),
         .rst_n(rst_n),
         .tx_start(tx_start),
-        .data_in({4'b0000, predicted_digit}), // Pad 4-bit digit to 8-bit ASCII
+        .data_in({4'b0000, predicted_digit}), 
         .tx_out(uart_tx_pin),
         .tx_done(tx_done)
     );
 
-    // --- The Memory ---
-    // (See the crucial Gowin note below about these modules!)
     mem_image_ram u_sram (
         .clk(clk),
         .write_en(sram_write_en),
         .read_addr(sram_read_addr),
-        .write_addr(u_fsm.byte_counter), // Using the FSM's counter for writing
+        .write_addr(u_fsm.byte_counter), 
         .data_in(rx_byte),
         .data_out(sram_pixel_out)
     );
