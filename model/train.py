@@ -12,8 +12,10 @@ import os
 class HardwareCNN(nn.Module):
     def __init__(self):
         super(HardwareCNN, self).__init__()
-        # 1 input channel, 1 output channel, 3x3 kernel
-        self.conv1 = nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=0)
+        # 1 input channel, 1 output channel, 3x3 kernel.
+        # bias=False — the hardware conv MAC chain has no bias adder, so
+        # leaving bias=True trains for a bias that gets silently dropped.
+        self.conv1 = nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=0, bias=False)
         self.relu = nn.ReLU()
         # 2x2 max pool, stride 2
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -48,20 +50,20 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 # ==========================================
 # 3. Train the Model
 # ==========================================
-print("Starting Training (1 Epoch for proof-of-concept)...")
+EPOCHS = 3
+print(f"Starting Training ({EPOCHS} epochs)...")
 model.train()
 
-# We only run 1 epoch just to get some trained weights quickly. 
-# You can increase this later to get better accuracy!
-for batch_idx, (data, target) in enumerate(train_loader):
-    optimizer.zero_grad()
-    output = model(data)
-    loss = criterion(output, target)
-    loss.backward()
-    optimizer.step()
-    
-    if batch_idx % 100 == 0:
-        print(f"Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}")
+for epoch in range(EPOCHS):
+    for batch_idx, (data, target) in enumerate(train_loader):
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+
+        if batch_idx % 200 == 0:
+            print(f"Epoch {epoch+1}/{EPOCHS} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
 print("Training Complete!")
 
@@ -103,3 +105,38 @@ def export_to_hex(model, filename="weights.hex"):
 
 # Run the exporter
 export_to_hex(model)
+
+def export_biases_to_mi(model, filename="bias.mi"):
+    print("Extracting biases for hardware...")
+
+    # Conv layer has no bias now (bias=False). Keep slot 0 as a zero
+    # placeholder so the FC layer's bias addressing (digit_counter + 1)
+    # in fc_layer.v stays unchanged.
+    fc_bias = model.fc.bias.detach().numpy()      # 10 values
+
+    conv_scale = 127.0 / np.max(np.abs(model.conv1.weight.detach().numpy()))
+    fc_scale   = 127.0 / np.max(np.abs(model.fc.weight.detach().numpy()))
+
+    # FC bias is added to the hardware accumulator, which has an
+    # effective scale of (255/256) * conv_scale * fc_scale relative to
+    # the float math. Scale the bias by the same factor so it actually
+    # influences the argmax.
+    bias_scale = (255.0 / 256.0) * conv_scale * fc_scale
+    q_fc_bias = [int(np.round(b * bias_scale)) for b in fc_bias]
+
+    all_biases = [0] + q_fc_bias  # addr 0 unused placeholder; FC biases at 1..10
+
+    # 3. Write the strict Gowin 32-bit .mi format
+    with open(filename, "w") as f:
+        f.write("#File_format=Hex\n")
+        f.write(f"#Address_depth={len(all_biases)}\n")
+        f.write("#Data_width=32\n")
+        for b in all_biases:
+            # Convert to 32-bit hex, properly handling negative Two's Complement
+            hex_val = format(b & 0xFFFFFFFF, '08X')
+            f.write(hex_val + "\n")
+
+    print(f"Success! {filename} created with {len(all_biases)} values.")
+
+# Run the exporter
+export_biases_to_mi(model)

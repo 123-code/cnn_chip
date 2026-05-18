@@ -10,6 +10,7 @@ module fc_layer (
     input  wire signed [31:0] bias_in,
     
     output reg  [15:0] rom_addr_out,
+    output wire [3:0]  bias_addr_out,    // NEW: Wire to request the correct bias
     output reg  [3:0]  predicted_digit,
     output reg         done
 );
@@ -26,9 +27,17 @@ module fc_layer (
 
     integer j;
 
+    // ==========================================
+    // BIAS ADDRESS ROUTING
+    // ==========================================
+    // Address 0 is reserved for Conv layer. 
+    // FC digits 0-9 use addresses 1 through 10.
+    assign bias_addr_out = digit_counter + 4'd1; 
+
     // A 5-state machine to ensure perfect math sync
     localparam S_CATCH = 3'd0, S_WAIT_ROM = 3'd1, S_CALC = 3'd2, S_EVAL = 3'd3, S_DONE = 3'd4;
     reg [2:0] state;
+
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -46,7 +55,11 @@ module fc_layer (
                         buffer[write_idx] <= feature_in;
                         if (write_idx == 168) begin
                             state <= S_WAIT_ROM;
-                            rom_addr_out <= 9; // Address 9: Skip Conv weights!
+                            // FC weights start at addr 9 (conv at 0-8).
+                            // ROM has 1-cycle latency; S_WAIT_ROM bumps addr to 9,
+                            // so the first S_CALC sees data[9] aligned to buffer[0].
+                            // (Verified against hw_sim.py which predicts digit 7.)
+                            rom_addr_out <= 8;
                         end else begin
                             write_idx <= write_idx + 1;
                         end
@@ -62,7 +75,7 @@ module fc_layer (
                 S_CALC: begin
                     rom_addr_out <= rom_addr_out + 1;
                     
-                    // Multiply and Add
+                    // Multiply and Add (Weights only)
                     accumulator <= accumulator + ($signed({1'b0, buffer[pixel_counter]}) * weight_in);
                     
                     if (pixel_counter == 168) begin
@@ -74,9 +87,12 @@ module fc_layer (
                 end
                 
                 S_EVAL: begin
-                    // Compare the fully calculated score
-                    if (accumulator > highest_score) begin 
-                        highest_score <= accumulator; 
+                    // Digit 0 always seeds the score (reset is hardwired off,
+                    // so highest_score powers up to 0 instead of -INF — without
+                    // this seed, any image where all scores are negative would
+                    // leave winning_digit stuck at 0).
+                    if (digit_counter == 4'd0 || (accumulator + bias_in) > highest_score) begin
+                        highest_score <= accumulator + bias_in;
                         winning_digit <= digit_counter;
                     end
                     

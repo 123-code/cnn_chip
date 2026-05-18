@@ -9,6 +9,7 @@ module compute_pipeline (
 
     output wire [9:0]  sram_addr_out,
     output wire [15:0] rom_addr_out,
+    output wire [3:0]  bias_addr_out,  // NEW WIRE
     output wire        layer_done,
     output wire [3:0]  predicted_digit
 );
@@ -25,12 +26,16 @@ module compute_pipeline (
     wire [9:0]  conv_sram_addr;
     wire [15:0] conv_rom_addr;
     wire [15:0] fc_rom_addr;
+    wire [3:0]  fc_bias_addr; // NEW WIRE from FC
 
     assign layer_done    = fc_done;
     assign sram_addr_out = conv_sram_addr;
 
-    // ROM port mux: conv owns the ROM until it finishes, then FC takes over.
+    // ROM port mux
     assign rom_addr_out  = conv_done ? fc_rom_addr : conv_rom_addr;
+
+    // Bias port mux: Conv layer owns address 0. FC layer takes addresses 1 through 10.
+    assign bias_addr_out = conv_done ? fc_bias_addr : 4'd0;
 
     conv_serial u_conv (
         .clk(clk), .rst_n(rst_n),
@@ -62,6 +67,7 @@ module compute_pipeline (
         .weight_in(weight_in),
         .bias_in(bias_in),
         .rom_addr_out(fc_rom_addr),
+        .bias_addr_out(fc_bias_addr), // Wired Up!
         .predicted_digit(predicted_digit),
         .done(fc_done)
     );

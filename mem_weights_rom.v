@@ -1,29 +1,30 @@
 module mem_weights_rom (
     input  wire        clk,
-    input  wire [15:0] read_addr,
-    
+    input  wire [15:0] read_addr,       // weight address (0..1698)
+    input  wire [3:0]  bias_addr,       // bias address  (0..10; 0 unused, 1..10 = FC biases)
+
     output reg signed [7:0]  weight_out,
     output reg signed [31:0] bias_out
 );
 
-    // Create an array large enough to hold all weights
-    // (e.g., 2000 bytes. Adjust size based on your final PyTorch model)
-    reg [7:0] rom_array [0:1999]; 
+    // 1699 weight bytes (conv kernel at 0..8, FC weights at 9..1698).
+    reg [7:0]  weight_rom [0:2047];
 
-    // Simulation-only initialization
+    // 11 32-bit biases (addr 0 is a zero placeholder; FC biases at 1..10).
+    reg [31:0] bias_rom   [0:15];
+
+    integer i;
     initial begin
-        // Loads a hex file into the array. 
-        // You will generate this file later with Python!
-        $readmemh("weights.hex", rom_array);
+        for (i = 0; i < 2048; i = i + 1) weight_rom[i] = 8'h00;
+        for (i = 0; i < 16;   i = i + 1) bias_rom[i]   = 32'h0;
+        $readmemh("weights.hex", weight_rom);
+        $readmemh("bias.hex",    bias_rom);
     end
 
-    // Synchronous Read
+    // 1-cycle synchronous read on both ports (matches Gowin pROM bypass mode).
     always @(posedge clk) begin
-        // In a real design, biases might be in a separate ROM or a specific offset.
-        // For simulation, we'll output the weight, and just hardcode bias to 0 for now
-        // until we know exactly how many biases your PyTorch model outputs.
-        weight_out <= rom_array[read_addr];
-        bias_out   <= 32'd0; 
+        weight_out <= weight_rom[read_addr];
+        bias_out   <= bias_rom[bias_addr];
     end
 
 endmodule

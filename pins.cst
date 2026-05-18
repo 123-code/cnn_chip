@@ -1,5 +1,6 @@
 // Tang Nano 20K specific pinout
 IO_LOC "clk" 4;          // The 27 MHz / 50 MHz onboard crystal
 IO_LOC "rst_n" 88;       // One of the onboard physical buttons
-IO_LOC "uart_rx_pin" 70; // USB-TTL RX pin
-IO_LOC "uart_tx_pin" 69; // USB-TTL TX pin
+IO_PORT "rst_n" PULL_MODE=UP;  // Force HIGH by default so chip leaves reset
+IO_LOC "uart_rx_pin" 69; // FPGA reads here (BL616's TX side)
+IO_LOC "uart_tx_pin" 70; // FPGA writes here (BL616's RX side)

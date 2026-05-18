@@ -1,3 +1,16 @@
 *.vcd
 *.vvp
 .claude/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# MNIST dataset (downloaded by torchvision on first run)
+model/data/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
