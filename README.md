@@ -1,22 +1,112 @@
-# CNN Chip
+# Tiny CNN Chip running MNIST in Verilog
 
 A Verilog-based Convolutional Neural Network (CNN) accelerator, designed to process MNIST images. This hardware accelerator takes advantage of parallel processing capabilities in FPGAs/ASICs to speed up inference times for a CNN.
 
 ## Overview
 
-The `cnn_chip` project implements a hardware pipeline for CNN inference. The main components are:
+## Top level layout:
 
-- **Top Level (`top_mnist_accel.v`)**: The primary wrapper for the design, integrating memory, the compute pipeline, UART, and the control unit.
-- **Compute Pipeline (`compute_pipeline/`)**: The core arithmetic logic for the neural network.
-  - `compute_pipeline.v`: Orchestrates the neural network layers.
-  - `conv_sliding_win.v`: Manages the sliding window mechanism for convolutional layers.
-  - `mac_array_3x3.v`: A 3x3 Multiply-Accumulate (MAC) array for performing 2D convolutions efficiently.
-  - `max_pool_2x2.v`: Applies 2x2 max pooling to downsample feature maps.
-  - `fc_layer.v`: A fully connected layer for final classification based on extracted features.
-- **Control Unit (`control_unit.v`)**: State machine that orchestrates data flow and pipeline execution.
-- **Memory (`mem_image_ram.v`, `mem_weights_rom.v`)**: Modules for storing input images (RAM) and network weights (ROM).
-- **UART Interface (`uart_rx.v`, `uart_tx.v`)**: Provides a serial communication interface to send images to the chip and receive predictions back to a host PC.
+Host PC (Python Script)
+                        ▲   │
+             tx_out     │   │ rx_in
+            (serial)    │   │ (serial)
+                        │   ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ Tang Nano 20K Boundary                                      │
+ │                                                             │
+ │  ┌────────────┐               ┌──────────────────────────┐  │
+ │  │            │rx_byte[7:0]   │                          │  │
+ │  │ UART RX/TX ├──────────────▶│     Input Image SRAM     │  │
+ │  │            │   write_en    │ (Single-Port, Hard IP)   │  │
+ │  └─────▲──────┘               └─────────────▲────────────┘  │
+ │        │                                    │               │
+ │        │                               read_addr[9:0]       │
+ │        │pred_digit[3:0]                     │               │
+ │        │tx_start      ┌───────────────┐     │               │
+ │        │              │               │─────┘               │
+ │        │              │ Main Control  │                     │
+ │        │              │      FSM      │rom_addr[15:0],read_en
+ │        │              │               │─────┐               │
+ │        │              └───────┬───────┘     │               │
+ │        │   start_layer (held) │             ▼               │
+ │        │   layer_type         │  ┌───────────────────────┐  │
+ │        │                      │  │   Weights pROM (IP)   │  │
+ │        │      layer_done      │  ├───────────────────────┤  │
+ │        │                      ▼  │    Bias pROM (IP)     │  │
+ │  ┌─────┴─────────────────────────┴───────────────────────┐  │
+ │  │                                                       │  │
+ │  │       Compute Pipeline (Conv -> Pool -> FC)           │◀─┼─ weight_val[7:0]
+ │  │                                                       │◀─┼─ bias_val[31:0]
+ │  └────────────────────────────▲──────────────────────────┘  │
+ │                               │                             │
+ │                         pixel_val[7:0]                      │
+ └─────────────────────────────────────────────────────────────┘
 
+## Compute Pipeline:
+
+[ Input Image SRAM ]                [ Weight pROM ]
+          │                                 │
+    pixel_val[7:0]                    weight_val[7:0]
+          │                                 │
+          ▼                                 ▼
+       ┌───────────────────────────────────────┐
+       │             MULTIPLIER                │ <--- (Only ONE multiplier left)
+       └──────────────────┬────────────────────┘
+                          │
+                   (16-bit signed)
+                          │
+                          ▼
+       ┌───────────────────────────────────────┐
+ ┌───▶ │               ADDER                   │ <--- (Replaces the entire 8-adder tree)
+ │     └──────────────────┬────────────────────┘
+ │                        │
+ │                        ▼
+ │     ┌───────────────────────────────────────┐
+ └─────┤         ACCUMULATOR REGISTER          │
+       └──────────────────┬────────────────────┘
+                          │
+                          │ (Outputs only after 9 tap cycles)
+                          ▼
+                  [ ReLU & >> 8 ]
+                          │
+                          ▼
+                    conv_out[7:0]
+
+
+## Compute Pipeline (FC & Bias)
+
+[ Max Pool Pipeline ]               [ Weight pROM ]
+          │                                 │
+   pool_pixel_val[7:0]                weight_val[7:0]
+          │                                 │
+          ▼                                 ▼
+       ┌───────────────────────────────────────┐
+       │             MULTIPLIER                │
+       └──────────────────┬────────────────────┘
+                          │
+                          ▼
+       ┌───────────────────────────────────────┐
+ ┌───▶ │               ADDER                   │
+ │     └──────────────────┬────────────────────┘
+ │                        │
+ └─────[   FC Accumulator Register (32-bit)    ]
+                          │
+                          │ (After all 169 FC weights are summed for a digit)
+                          ▼
+       ┌───────────────────────────────────────┐         [ Bias pROM ]
+       │            FINAL BIAS ADDER           │ <───────  bias_val[31:0]
+       └──────────────────┬────────────────────┘
+                          │
+                          ▼
+                 (Total Score + Bias)
+                          │
+                          ▼
+       ┌───────────────────────────────────────┐
+       │           ARGMAX COMPARATOR           │
+       │    (if Score > highest_score)         │ ────▶ [ predicted_digit ]
+       └───────────────────────────────────────┘
+
+       
 ## Simulation & Testing
 
 The project includes testbenches (`tb_top.v`) and can be simulated using Icarus Verilog (`sim.vvp`). Resulting waveforms (`waveform.vcd`) can be viewed using GTKWave.
