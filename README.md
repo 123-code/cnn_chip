@@ -2,6 +2,12 @@
 
 End-to-end MNIST digit-classifier on a **Tang Nano 20K** (Gowin GW2AR-18) FPGA. A tiny CNN — one 3×3 conv channel, ReLU, 2×2 max-pool, and a 169→10 fully connected layer — runs entirely on-chip in fixed-point INT8 arithmetic. Trained in PyTorch, quantized, and loaded into on-chip BSRAM/pROM blocks.
 
+## Demo
+
+https://github.com/123-code/cnn_chip/raw/main/media/demo.mov
+
+The terminal shows the input image as ASCII art, then the FPGA's LEDs light up to spell the predicted digit in binary (active-low: lit LED = 1 bit). See `demo_flash.sh` to reproduce.
+
 Two flavors of the design live in this repo, sharing the same compute datapath:
 
 - **LED version** — image baked into the bitstream; result shown on six on-board LEDs. Headless "power on → see the answer" demo.

@@ -17,7 +17,7 @@ except ImportError:
     sys.exit("pyserial not installed. Run: pip install pyserial")
 
 # === EDIT ME =================================================================
-USB_PORT  = "/dev/cu.usbserial-20250303171"   # find with: ls /dev/cu.usbserial*
+USB_PORT  = "/dev/cu.usbserial-20250303170"   # find with: ls /dev/cu.usbserial*
 IMAGE_HEX = os.path.join(os.path.dirname(__file__), "..", "test_image.hex")
 # =============================================================================
 
@@ -48,14 +48,20 @@ def main():
         sys.exit(f"Could not open {USB_PORT}: {e}\n"
                  f"Tip: run `ls /dev/cu.usbserial*` and edit USB_PORT.")
 
-    # Drop any stale bytes the FPGA / USB bridge might have buffered
-    # from a previous run.
-    time.sleep(0.1)
-    port.reset_input_buffer()
-    port.reset_output_buffer()
-    stale = port.read(port.in_waiting or 0)
-    if stale:
-        print(f"Drained {len(stale)} stale byte(s): {stale.hex()}")
+    # Drop any stale bytes. The FPGA's UART_TX line can spit out a junk
+    # framing byte right after configuration / power-up.
+    drained = bytearray()
+    drain_deadline = time.time() + 1.0
+    while time.time() < drain_deadline:
+        port.reset_input_buffer()
+        time.sleep(0.1)
+        n = port.in_waiting
+        if n:
+            chunk = port.read(n)
+            drained.extend(chunk)
+            drain_deadline = time.time() + 0.5  # extend if activity
+    if drained:
+        print(f"Drained {len(drained)} stale byte(s): {drained.hex()}")
 
     # 2. Send the pixels to the hardware!
     print("Streaming 784 pixels to the FPGA (Throttled for safety)...")
@@ -70,19 +76,28 @@ def main():
     t_write = time.time() - start_time
     print(f"  write returned in {t_write * 1000:.1f} ms")
 
-    # 3. Wait for the hardware to reply
+    # 3. Wait for the hardware to reply — collect for up to 3s so we don't
+    #    confuse a config-transition glitch byte with the real answer.
     print("Waiting for the chip to compute and reply...")
     t1 = time.time()
-    reply = port.read(1)
+    received = bytearray()
+    deadline = t1 + 3.0
+    while time.time() < deadline:
+        chunk = port.read(port.in_waiting or 1)
+        if chunk:
+            received.extend(chunk)
+            deadline = time.time() + 0.5  # extend if activity
     t_read = time.time() - t1
-    print(f"  reply received after {t_read * 1000:.1f} ms")
-    if not reply:
-        sys.exit("Timed out waiting for the chip. Is the FPGA powered + flashed "
-                 "with the latest bitstream?")
+    print(f"  collected {len(received)} byte(s) in {t_read*1000:.0f} ms: {received.hex()}")
+    if not received:
+        sys.exit("No reply.")
 
-    digit = reply[0] & 0x0F
-    print(f"\nRaw byte from chip: 0x{reply[0]:02X}")
-    print(f"PREDICTED DIGIT  : {digit}")
+    # Heuristic: the real answer is the LAST byte (any earlier ones are
+    # boot/config glitches).
+    last = received[-1]
+    digit = last & 0x0F
+    print(f"\nLast byte from chip: 0x{last:02X}")
+    print(f"PREDICTED DIGIT   : {digit}")
     port.close()
 
 
