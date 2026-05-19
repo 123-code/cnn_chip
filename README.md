@@ -7,6 +7,18 @@ Two flavors of the design live in this repo, sharing the same compute datapath:
 - **LED version** — image baked into the bitstream; result shown on six on-board LEDs. Headless "power on → see the answer" demo.
 - **UART version** — image streamed in over UART at runtime; result sent back as one byte. Used for development and batch verification from a host PC.
 
+## Accuracy
+
+| Model                                                    | Test set         | Accuracy |
+|----------------------------------------------------------|------------------|---------:|
+| PyTorch float32 (CPU)                                    | MNIST test (10000) | **91.80%** |
+| PyTorch float32 (CPU)                                    | 50 sampled images  | 96.0%      |
+| **FPGA chip** (INT8 quantized, fixed-point)              | 50 sampled images  | **94.0%**  |
+
+The chip accuracy was produced by a bit-accurate simulator (`model/hw_sim.py`) that performs the *exact same* fixed-point operations the FPGA does and reads the *exact same* `.mi` byte streams the FPGA loads into its ROMs at config time. We separately validated the simulator against the real hardware: the live FPGA classifies each individual image to the same digit the simulator predicts. See `model/batch_meta.json` for the full per-image breakdown.
+
+The quantization gap (chip 94.0% vs CPU 96.0% on the same 50 images) is the cost of compressing the model to INT8 weights + an `acc >> 8` activation scale that fits in a `acc[15:8]` output byte. Larger models with more channels could close this gap.
+
 ---
 
 ## Top level layout
