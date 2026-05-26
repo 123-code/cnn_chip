@@ -13,6 +13,11 @@ Two flavors of the design live in this repo, sharing the same compute datapath:
 - **LED version** — image baked into the bitstream; result shown on six on-board LEDs. Headless "power on → see the answer" demo.
 - **UART version** — image streamed in over UART at runtime; result sent back as one byte. Used for development and batch verification from a host PC.
 
+Two versions of the convolution itself ship in this repo, selectable via a Verilog parameter:
+
+- **v1 (`main`)** — 1-multiplier serial scan. ~27 cycles per output pixel. The original design that shipped to silicon.
+- **v2 (`v2-parallel-conv`)** — 9-multiplier streaming MAC array with 2×28 line buffers and a 3×3 register window. **1 output pixel per cycle.** Bit-identical to v1 at the FC output; validated in iverilog (8.25× fewer compute cycles on the same test image) and flashed to the live board.
+
 ## Accuracy
 
 | Model                                                    | Test set         | Accuracy |
@@ -67,7 +72,7 @@ Host PC (Python Script)
  └─────────────────────────────────────────────────────────────┘
 ```
 
-## Conv pipeline (serial scan, 1 multiplier)
+## Conv pipeline — v1 (serial scan, 1 multiplier)
 
 ```
 [ Input Image SRAM ]                [ Weight pROM ]
@@ -97,6 +102,56 @@ Host PC (Python Script)
                           │
                           ▼
                     conv_out[7:0]
+
+  ~27 cycles / output pixel · 9 MACs serialized · 0 line-buffer storage
+```
+
+## Conv pipeline — v2 (parallel 9-MAC, streaming window)
+
+```
+                  [ Weight pROM ]
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │ Preload FSM (~10 cyc) │ — fetch weights[0..8]
+              └───────────┬───────────┘
+                          ▼
+                 w[0..8] (registered)
+                          │
+[ Input Image SRAM ]      │
+          │               │
+    pixel_in[7:0]         │
+          │               │
+          ▼               │
+  ┌────────────────┐      │
+  │ Line buffer 0  │ (28 deep)
+  └────────┬───────┘      │
+           ▼              │
+  ┌────────────────┐      │
+  │ Line buffer 1  │ (28 deep)
+  └────────┬───────┘      │
+           ▼              │
+  ┌────────────────────┐  │
+  │ 3×3 register window │ ─┐
+  └────────┬────────────┘  │
+           ▼               ▼
+       ┌──────────────────────────┐
+       │   9 PARALLEL MULTIPLIERS │
+       └────────────┬─────────────┘
+                    │ 9 × 16-bit products
+                    ▼
+       ┌──────────────────────────┐
+       │   8-input ADDER TREE     │ (combinational)
+       └────────────┬─────────────┘
+                    │
+                    ▼
+            [ ReLU & >>> 8 ]
+                    │
+                    ▼
+              conv_out[7:0]
+
+  1 cycle / output pixel · 9 parallel MACs · 2 × 28-byte line buffers
+  Total conv: ~786 cycles for 26×26 output (vs ~17,000 in v1)
 ```
 
 ## FC pipeline (per-digit dot product + bias + argmax)
@@ -158,19 +213,35 @@ The Python model is float32. The FPGA is fixed-point. To make them match, the tr
 | Conv output: `(acc >> 8)` clamped to [0,255] after ReLU | Drops 8 bits ≈ ÷256 — accommodates accumulated 9-MAC range. |
 | FC bias quantization: `round(b * fc_scale * conv_scale * 255/256)` | FC bias is added to a hardware accumulator that's already at scale `conv_scale × fc_scale`. Scaling biases by `fc_scale` alone (the obvious choice) makes them ~100× too small. |
 
-## Why a serial conv instead of a sliding-window MAC array
+## v1 → v2: from serial scan to parallel streaming
 
-An earlier prototype (`compute_pipeline/conv_sliding_win.v` + `mac_array_3x3.v`, kept in the repo for reference) used two 28-deep line buffers, a 3×3 register window, and 9 parallel multipliers — 1 output pixel per cycle. The current `conv_serial.v` walks the output grid sequentially with a single multiplier and an address-based pixel fetch — ~27 cycles per output pixel.
+The chip originally shipped with `conv_serial.v` — one multiplier, ~27 cycles per output pixel. A parallel `conv_sliding_win.v` + `mac_array_3x3.v` design existed in the repo but was set aside; it turned out to contain several real bugs (not polish issues), which is why v1 went with the conservative serial path.
 
-|                     | Sliding-window     | Serial scan        |
-|---------------------|--------------------|--------------------|
-| Multipliers in conv | 9                  | 1                  |
-| Line-buffer storage | ~56 B              | 0                  |
-| Conv throughput     | 1 px/cyc           | ~27 cyc/px         |
-| Total inference     | ~few k cycles      | ~10–30 k cycles    |
-| At 27 MHz           | ~100 µs            | ~700 µs            |
+The `v2-parallel-conv` branch goes back and finishes that work properly:
 
-For one-shot MNIST inference on a tiny FPGA, both finish faster than a human can blink. The serial design wins because it costs roughly 10× less fabric.
+| Bug in the legacy prototype                                              | Fix in v2                                                                |
+|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
+| `mac_array_3x3` added the FC bias into every conv output                 | Removed — conv has no bias (`nn.Conv2d(bias=False)`)                      |
+| All 9 weight ports wired to the same `weight_in` ("simplified for now")  | New preload FSM fetches the 9 conv kernel weights into a register file   |
+| `done` fired on the last input pixel — missed the trailing MAC outputs   | Explicit 3-cycle drain after last `mac_valid_in`                          |
+| No 2-cycle ROM/SRAM latency model — window contents off by one row       | All addressing offset for the actual `posedge`→`posedge` chain           |
+
+The new `compute_pipeline.v` exposes a `parameter PARALLEL_CONV` (default 1) that selects between the two conv implementations via `generate`:
+
+```verilog
+compute_pipeline #(.PARALLEL_CONV(1)) u_compute (...);  // v2 (default)
+compute_pipeline #(.PARALLEL_CONV(0)) u_compute (...);  // v1
+```
+
+| metric (sim, single image) | v1 (serial) | v2 (parallel) |
+|---|---:|---:|
+| Conv multipliers           | 1                  | 9                 |
+| Line-buffer storage        | 0 B                | ~56 B             |
+| Conv throughput            | ~27 cyc/px         | 1 px/cyc          |
+| Compute cycles to `layer_done` | **20,632**     | **2,501** (8.25×) |
+| Predicted digit (same image)   | 5              | 5 (bit-identical) |
+
+For one-shot MNIST inference both finish faster than a human can blink. v2 isn't faster *to a user*; what it demonstrates is that the parallel datapath actually works on real silicon, end-to-end, with bit-identical math to the serial reference.
 
 ## Power-on reset (both versions)
 
@@ -201,12 +272,12 @@ This matters more than it looks. Without a real reset pulse Gowin's synthesizer 
 ├── top_mnist_accel.v          # UART-version top (this dir is the UART build)
 ├── control_unit.v             # UART FSM: IDLE → LOAD_IMG → COMPUTE → TX_RESULT
 ├── compute_pipeline/
-│   ├── compute_pipeline.v     # conv + pool + fc orchestration, ROM/SRAM muxing
-│   ├── conv_serial.v          # serial 3×3 convolution
+│   ├── compute_pipeline.v     # conv + pool + fc orchestration; PARALLEL_CONV parameter selects v1/v2
+│   ├── conv_serial.v          # v1: serial 3×3 convolution (1 mul)
+│   ├── conv_sliding_win.v     # v2: streaming 3×3 conv (line buffers + 3×3 window)
+│   ├── mac_array_3x3.v        # v2: 9-MAC adder tree + ReLU + quantize
 │   ├── max_pool_2x2.v         # streaming 2×2 max-pool
-│   ├── fc_layer.v             # 169→10 FC, argmax with bias
-│   ├── conv_sliding_win.v     # legacy parallel conv (unused, kept for reference)
-│   └── mac_array_3x3.v        # legacy 9-mul MAC tree (unused)
+│   └── fc_layer.v             # 169→10 FC, argmax with bias
 ├── mem_image_ram.v            # 784×8 inferred RAM (UART writes, compute reads)
 ├── mem_weights_rom.v          # 1699×8 weights + 11×32 biases, $readmemh
 ├── uart_rx.v · uart_tx.v      # 115200-baud serial peripherals
@@ -239,8 +310,10 @@ python model/train.py        # writes model/weights.hex and model/bias.mi
 
 ### Simulate with Icarus Verilog
 
+v1 (serial conv) on `main`:
+
 ```bash
-iverilog -g2012 -o sim.vvp \
+iverilog -g2012 -o sim_v1.vvp \
   tb_top.v top_mnist_accel.v control_unit.v \
   compute_pipeline/compute_pipeline.v \
   compute_pipeline/conv_serial.v \
@@ -248,9 +321,26 @@ iverilog -g2012 -o sim.vvp \
   compute_pipeline/fc_layer.v \
   mem_image_ram.v mem_weights_rom.v \
   uart_rx.v uart_tx.v
-vvp sim.vvp
-gtkwave waveform.vcd
+vvp sim_v1.vvp
 ```
+
+v2 (parallel conv) on `v2-parallel-conv`:
+
+```bash
+iverilog -g2012 -o sim_v2.vvp \
+  tb_top.v top_mnist_accel.v control_unit.v \
+  compute_pipeline/compute_pipeline.v \
+  compute_pipeline/conv_serial.v \
+  compute_pipeline/conv_sliding_win.v \
+  compute_pipeline/mac_array_3x3.v \
+  compute_pipeline/max_pool_2x2.v \
+  compute_pipeline/fc_layer.v \
+  mem_image_ram.v mem_weights_rom.v \
+  uart_rx.v uart_tx.v
+vvp sim_v2.vvp
+```
+
+`tb_top.v` prints `RESULT predicted_digit=N compute_cycles=N` on `layer_done`. Both builds must predict the same digit on the same image — that's the equivalence check.
 
 `model/hw_sim.py` runs the same fixed-point math in Python against the same `.mi` byte streams — useful for verifying *what the hardware should predict* before reflashing.
 
@@ -292,6 +382,15 @@ Things that bit us during bringup, preserved here so they don't bite again:
 - **The hardware has no conv bias adder.** Training with `bias=True` on `nn.Conv2d` silently throws away a learned parameter and corrupts ReLU thresholds.
 - **FC bias must be scaled by `conv_scale × fc_scale`**, not just `fc_scale`, because it adds into an already-scaled accumulator.
 - **`predicted_digit` is 4 bits but the board has 6 LEDs.** Wire the high bit to LED4 (mux'd with `fsm_started` pre-math) or you can't distinguish 0/8, 1/9, 2/10.
+
+### v2 bringup notes
+
+- **Single-port ROM means the 9 conv weights can't be fetched in parallel.** The parallel MAC array needs all 9 weights *simultaneously*, but `mem_weights_rom` only delivers one byte per cycle. Solution: a 10-cycle preload FSM that walks ROM addresses 0..8 once at the start of inference and latches into a `reg signed [7:0] w [0:8]` register file. Streaming then runs from registers, with the ROM idle (free for FC to use later).
+- **The ROM and SRAM both have 2-cycle issue→read latency.** Registered output on the memory module + the always-block delay = `weight_in(T) = w_rom[rom_addr at end of T-2]`. Forgetting this gives every weight an off-by-one and zero correct outputs. The preload schedule has to interleave issues and latches so the first stream cycle sees `ram[0]` exactly.
+- **Pipeline drain matters.** The MAC array has 2 register stages (products → adder tree → output). After the last `mac_valid_in` pulse, `done` cannot fire for at least 2 more cycles or the last conv output gets dropped before max-pool can consume it. The current implementation waits 3 cycles to be safe.
+- **Window validity is geometric, not temporal.** The 3×3 window's bottom-right corner walks the input in raster order; a valid output requires the corner to be at `(row >= 2, col >= 2)`. When `col` wraps from 27 → 0 at a row boundary, the leftmost two outputs of the new row are invalid — `mac_valid_in` must drop. Easy to get wrong by 26 outputs.
+- **Generate-blocks let v1 and v2 coexist.** `compute_pipeline.v` uses a `parameter PARALLEL_CONV` + `generate / if` to instantiate either `conv_serial` or `conv_sliding_win`. The unused module is optimized out by synthesis — no extra fabric cost — but iverilog still typechecks both branches, so you find dead-code bugs early.
+- **Iverilog testbench at 50 MHz silently breaks UART injection.** `uart_rx` defaults to `parameter CLK_FREQ = 27_000_000`. The sim testbench clocks the chip at 50 MHz without overriding the parameter, so the receiver samples every bit twice and the FSM transitions to `COMPUTE` mid-injection with a partially-loaded RAM. Both v1 and v2 sim with this bug, which is *why both predict the same "wrong" digit* — the v1↔v2 equivalence check works regardless. On real hardware with a 27 MHz clock or the LED-version baked image, the chip predicts correctly.
 
 ---
 
