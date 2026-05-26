@@ -14,3 +14,13 @@ model/data/
 .DS_Store
 .vscode/
 .idea/
+
+# Sim outputs / transient logs
+*_out.txt
+sim_*.vvp
+waveform*.vcd
+
+# Gowin build artifacts (project lives outside repo anyway)
+impl/
+*.gprj.user
+*.fs
